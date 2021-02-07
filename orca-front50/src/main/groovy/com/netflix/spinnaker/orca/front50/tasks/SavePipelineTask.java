@@ -22,12 +22,14 @@ import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus;
 import com.netflix.spinnaker.orca.api.pipeline.models.StageExecution;
 import com.netflix.spinnaker.orca.front50.Front50Service;
 import com.netflix.spinnaker.orca.front50.PipelineModelMutator;
+import com.netflix.spinnaker.orca.front50.pipeline.SavePipelineStage;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import retrofit.client.Response;
@@ -37,13 +39,23 @@ public class SavePipelineTask implements RetryableTask {
 
   private Logger log = LoggerFactory.getLogger(getClass());
 
-  @Autowired(required = false)
-  private Front50Service front50Service;
+  @Autowired
+  SavePipelineTask(
+      Optional<Front50Service> front50Service,
+      Optional<List<PipelineModelMutator>> pipelineModelMutators,
+      ObjectMapper objectMapper,
+      @Value("${tasks.use-shared-managed-service-accounts:false}")
+          boolean useSharedManagedServiceAccounts) {
+    this.front50Service = front50Service.orElse(null);
+    this.pipelineModelMutators = pipelineModelMutators.orElse(new ArrayList<>());
+    this.objectMapper = objectMapper;
+    this.useSharedManagedServiceAccounts = useSharedManagedServiceAccounts;
+  }
 
-  @Autowired(required = false)
-  private List<PipelineModelMutator> pipelineModelMutators = new ArrayList<>();
-
-  @Autowired ObjectMapper objectMapper;
+  private final boolean useSharedManagedServiceAccounts;
+  private final Front50Service front50Service;
+  private final List<PipelineModelMutator> pipelineModelMutators;
+  ObjectMapper objectMapper;
 
   @SuppressWarnings("unchecked")
   @Override
@@ -149,11 +161,7 @@ public class SavePipelineTask implements RetryableTask {
 
     // Managed Service account exists and roles are set; Update triggers
     triggers.stream()
-        .filter(
-            t -> {
-              String runAsUser = (String) t.get("runAsUser");
-              return runAsUser == null || runAsUser.endsWith("@managed-service-account");
-            })
+        .filter(t -> runAsUserIsNullOrManagedServiceAccount((String) t.get("runAsUser")))
         .forEach(t -> t.put("runAsUser", serviceAccount));
   }
 
@@ -168,5 +176,12 @@ public class SavePipelineTask implements RetryableTask {
           .orElse(null);
     }
     return null;
+  }
+
+  private boolean runAsUserIsNullOrManagedServiceAccount(String runAsUser) {
+    return runAsUser == null
+        || runAsUser.endsWith(SavePipelineStage.SERVICE_ACCOUNT_SUFFIX)
+        || (useSharedManagedServiceAccounts
+            && runAsUser.endsWith(SavePipelineStage.SHARED_SERVICE_ACCOUNT_SUFFIX));
   }
 }

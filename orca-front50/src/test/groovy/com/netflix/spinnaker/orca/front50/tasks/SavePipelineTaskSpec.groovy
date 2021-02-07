@@ -34,8 +34,10 @@ class SavePipelineTaskSpec extends Specification {
 
   ObjectMapper objectMapper = new ObjectMapper()
 
+  boolean useSharedManagedServiceAccounts = false
+
   @Subject
-  SavePipelineTask task = new SavePipelineTask(front50Service: front50Service, objectMapper: objectMapper, pipelineModelMutators: [mutator])
+  SavePipelineTask task = new SavePipelineTask(Optional.of(front50Service), Optional.of([mutator]), objectMapper, useSharedManagedServiceAccounts)
 
   def "should run model mutators with correct context"() {
     given:
@@ -146,6 +148,40 @@ class SavePipelineTaskSpec extends Specification {
     def stage = new StageExecutionImpl(PipelineExecutionImpl.newPipeline("orca"), "whatever", [
       pipeline: Base64.encoder.encodeToString(objectMapper.writeValueAsString(pipeline).bytes)
     ])
+
+    when:
+    stage.getContext().put('pipeline.serviceAccount', expectedRunAsUser)
+    front50Service.savePipeline(_, _) >> { Map<String, Object> newPipeline, Boolean staleCheck ->
+      runAsUser = newPipeline.triggers[0].runAsUser
+      new Response('http://front50', 200, 'OK', [], null)
+    }
+    task.execute(stage)
+
+    then:
+    runAsUser == expectedRunAsUser
+  }
+
+  def "should update runAsUser with shared service account if use-shared-service-accounts is true"() {
+    given:
+    String runAsUser
+    def expectedRunAsUser = 'my-service-acct-id@shared-managed-service-account'
+    def pipeline = [
+        application: 'orca',
+        name: 'my pipeline',
+        roles: ['foo'],
+        stages: [],
+        triggers: [
+            [
+                type: 'cron',
+                enabled: true
+            ]
+        ]
+    ]
+    def stage = new StageExecutionImpl(PipelineExecutionImpl.newPipeline("orca"), "whatever", [
+        pipeline: Base64.encoder.encodeToString(objectMapper.writeValueAsString(pipeline).bytes)
+    ])
+
+    task = new SavePipelineTask(Optional.of(front50Service), Optional.of([mutator]), objectMapper, true)
 
     when:
     stage.getContext().put('pipeline.serviceAccount', expectedRunAsUser)

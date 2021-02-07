@@ -18,6 +18,7 @@ package com.netflix.spinnaker.orca.front50.tasks
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.google.common.collect.ImmutableMap
+import com.google.common.hash.Hashing
 import com.netflix.spinnaker.fiat.model.UserPermission
 import com.netflix.spinnaker.fiat.model.resources.Role
 import com.netflix.spinnaker.fiat.model.resources.ServiceAccount
@@ -39,10 +40,11 @@ class SaveServiceAccountTaskSpec extends Specification {
     _ * isEnabled() >> true
   }
   ObjectMapper objectMapper = new ObjectMapper()
+  boolean useSharedManagedServiceAccounts = false
 
   @Subject
-  SaveServiceAccountTask task = new SaveServiceAccountTask(fiatStatus: fiatStatus,
-    front50Service: front50Service, fiatPermissionEvaluator: fiatPermissionEvaluator)
+  SaveServiceAccountTask task = new SaveServiceAccountTask(Optional.of(fiatStatus), Optional.of(front50Service),
+  Optional.of(fiatPermissionEvaluator), useSharedManagedServiceAccounts)
 
   def "should do nothing if no pipeline roles present"() {
     given:
@@ -235,5 +237,42 @@ class SaveServiceAccountTaskSpec extends Specification {
     result.context == ImmutableMap.of(
       'pipeline.id', uuid,
       'pipeline.serviceAccount', expectedServiceAccountName)
+  }
+
+  def "should generate a stable service account ID if useSharedManagedServiceAccounts is true"() {
+    given:
+    def pipeline = [
+        id: 'pipeline-id',
+        application: 'orca',
+        name: 'My pipeline',
+        stages: [],
+        roles: ['foo']
+    ]
+    def stage = stage {
+      context = [
+          pipeline: Base64.encoder.encodeToString(objectMapper.writeValueAsString(pipeline).bytes)
+      ]
+    }
+    def expectedServiceAccountName = Hashing.sha256().hashBytes("foo".getBytes()).toString()
+    def expectedServiceAccount = new ServiceAccount(name: expectedServiceAccountName + "@shared-managed-service-account", memberOf: ['foo'])
+
+    task = new SaveServiceAccountTask(Optional.of(fiatStatus), Optional.of(front50Service),
+    Optional.of(fiatPermissionEvaluator), true)
+
+    when:
+    stage.getExecution().setTrigger(new DefaultTrigger('manual', null, 'abc@somedomain.io'))
+    def result = task.execute(stage)
+
+    then:
+    1 * fiatPermissionEvaluator.getPermission('abc@somedomain.io') >> {
+      new UserPermission().addResources([new Role('foo')]).view
+    }
+
+    1 * front50Service.saveServiceAccount(expectedServiceAccount) >> {
+      new Response('http://front50', 200, 'OK', [], null)
+    }
+
+    result.status == ExecutionStatus.SUCCEEDED
+    result.context == ImmutableMap.of('pipeline.serviceAccount', expectedServiceAccount.name)
   }
 }
